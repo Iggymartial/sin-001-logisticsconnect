@@ -56,3 +56,48 @@ resolved exactly as expected: two clean merges (all rows agreed), two
 flagged conflicts (rows genuinely disagreed), and the
 blank-province edge case correctly matched anyway. 18 raw rows reduced
 to 10 trustworthy hub records.
+
+## Stage 2: synchronous REST integration
+
+**Decision: delay-stage-service tracks a stage PER HUB (a map), not
+one global value.** Different from the companion HealthSafe project's
+alert-level-service, which tracked a single system-wide status. The
+integration contract here is explicit that each hub has its own
+independent delay stage (`GET /delay-stage/{hubId}`), which makes
+sense domain-wise too - a weather shutdown at one hub shouldn't
+imply anything about a hub on the other side of the country.
+
+**Decision: a hub with no delay stage ever explicitly set defaults to
+stage 0, rather than 404.** transit-service needs SOME stage value for
+any hub it's asked to compute an ETA for. Treating "never reported" as
+"no known delay" is more useful than forcing every single hub to be
+explicitly initialised before an ETA can ever be calculated - and it's
+a reasonable real-world default: absence of a reported delay is a
+better assumption than an arbitrary one.
+
+**Decision: transit-service fails loudly (503) if delay-stage-service
+is unreachable, rather than silently assuming stage 0 and returning an
+ETA anyway.** This was a genuine judgement call - a "fail open" design
+would keep the ETA endpoint always answering something. I chose to
+fail closed instead: a falsely optimistic ETA (assuming no delay when
+the real answer is simply unknown) could actively mislead someone
+relying on it, which is worse than an honest "I can't tell you right
+now". Matches the same reasoning already applied to an equivalent
+situation in the companion HealthSafe project, kept consistent
+deliberately.
+
+**Decision: the ETA formula produces a WIDENING window, not just a
+later single point, as the delay stage rises.** The README describes
+"estimated arrival windows" (plural, range-based), not a single
+timestamp. Modelled earliest and latest hours growing at different
+rates (2h/stage vs 5h/stage) so that a bigger disruption is reflected
+as both later AND less certain - verified this stays monotonically
+increasing and the window never narrows across the full 0-8 range
+before trusting it.
+
+**Decision: HubClient reuses the sealed-interface pattern
+(Found/NotFound/Unavailable) from the companion HealthSafe project's
+WardClient.** Same problem, same solution - the compiler forces every
+caller to handle all three outcomes explicitly, which is exactly the
+signal this stage is meant to demonstrate: not assuming the happy path
+when calling a downstream service.
