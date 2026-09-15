@@ -172,3 +172,72 @@ to package-status-topic, and the very next GET to transit-service's
 2. This closes out Stage 3 - the required core of this second project
 is now fully built and genuinely proven working against real, live
 services.
+
+## Stage 4: AlertBot
+
+**Observation: this stretch stage is structurally simpler than the
+equivalent one in the companion HealthSafe project.** There, Stage 4
+introduced a brand new producer (ward-service) and a brand new queue
+(equipment-failure-queue). Here, alertbot is just a SECOND consumer on
+the SAME topic delay-stage-service already publishes to in Stage 3 -
+no new publisher, no new endpoint needed to trigger anything. It
+listens passively and decides for itself when something is worth
+reacting to.
+
+**Decision: track each hub's previous stage and only alert on a
+genuine CROSSING, not on every message where the stage happens to
+still be high.** The README's own wording ("crosses a threshold")
+specifically implies a transition, not a level check. Without this,
+a hub sitting at stage 7 for ten consecutive messages would trigger
+ten identical, noisy alerts. Verified the crossing logic with a
+simulated message sequence before writing it in Java: correctly
+silent while a hub stays high, correctly re-alerts if a hub drops
+below the threshold and crosses again later, and correctly treats a
+brand-new hub's first-ever high reading as a genuine crossing (no
+prior record is treated as 0, consistent with the default already
+used everywhere else in this project for "unknown state").
+
+**Decision: ALERT_THRESHOLD = 5, a deliberate but arbitrary domain
+choice.** The brief explicitly leaves this up to the implementer.
+Reasoned it as: stages 0-4 are minor/manageable delays not worth a
+public notification, 5-8 represent disruption significant enough to
+warrant one.
+
+**Decision: keeps every alert ever posted, not just the latest per
+hub** - same reasoning as the companion HealthSafe project's queue
+consumer: each alert is a discrete event, and two separate crossings
+for the same hub (e.g. an improvement then a second disruption) are
+two separate facts that both matter.
+
+**Fixed alertbot's MqConfig.java to use the same remapped port (61660)
+already applied to delay-stage-service and transit-service** - this
+file hadn't been touched yet and still had the old, blocked port
+baked in. All three copies of MqConfig.java need to agree with each
+other and with docker-compose.yml, or the broker connection silently
+fails via the graceful-degradation fallback rather than throwing an
+obvious error - exactly the confusing symptom already hit once in
+Stage 3.
+
+## Stage 4 confirmed working end-to-end, real broker
+
+Tested the exact scenario the crossing logic was designed for, not
+just a single happy-path check: H-504 set to stage 2 (below
+threshold, correctly silent), then stage 7 (crosses the threshold,
+correctly fired exactly one alert), then stage 8 (stays high,
+correctly did NOT fire a second alert). That third step is the one
+that actually proves the distinction between "crosses a threshold"
+and "is above a threshold" works in practice, not just in the earlier
+Python simulation - a naive "is current stage >= threshold" check
+would have incorrectly added a second, duplicate alert at this step.
+
+This closes out all four stages of this second project: ingestion
+with a genuinely harder duplicate-detection problem than the
+companion project, a full three-service REST chain with deliberately
+reasoned (and deliberately inconsistent-on-purpose) failure handling
+between the sync and async versions of the same call, real async
+decoupling over a topic, and a second consumer on that same topic
+correctly implementing threshold-crossing rather than a naive level
+check. Every stage built, tested against real running services, and
+every real incident - including a genuine Windows port-binding
+problem, not just a code bug - diagnosed and fixed with the actual
+reasoning written down.
