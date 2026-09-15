@@ -101,3 +101,74 @@ WardClient.** Same problem, same solution - the compiler forces every
 caller to handle all three outcomes explicitly, which is exactly the
 signal this stage is meant to demonstrate: not assuming the happy path
 when calling a downstream service.
+
+## Stage 3: MQ decoupling (package-status-topic)
+
+**Decision: reused DelayStage (adding a timestamp field) as both the
+REST response shape and the MQ event payload**, rather than a separate
+event type. Same reasoning as the companion HealthSafe project: the
+two are identical in shape, so a second type would be pure duplication
+with no benefit yet.
+
+**Decision: the delay-stage-service map now stores the full DelayStage
+record, not a bare int.** This was needed once GET had to return a
+real timestamp - for a hub that's genuinely had its stage set, that
+timestamp should reflect when it was actually set, not be fabricated
+fresh on every read.
+
+**Decision: transit-service's failure handling deliberately CHANGES
+between Stage 2 and Stage 3, and this is intentional, not an
+inconsistency.** In Stage 2, an unreachable delay-stage-service meant
+"my last-known information could be actively stale or wrong" - failing
+loudly (503) was the right call there, to avoid a falsely optimistic
+ETA. In Stage 3, "no event received yet for this hub" means something
+different: it genuinely means no delay has ever been reported for that
+hub, which is exactly the same default delay-stage-service itself
+already applies. Defaulting to stage 0 here isn't papering over
+missing information the way it would have been in Stage 2 - it's the
+correct interpretation of what "no message yet" actually means in a
+push-based system.
+
+**Decision: kept the subscription non-durable, same as the companion
+project's topic.** If transit-service is offline when a stage change
+is published, that update is simply missed, not queued for later
+delivery - accepted as the correct tradeoff for a topic used for
+broadcast status, not something requiring guaranteed delivery.
+
+**Correction I caught while writing this:** first wrote the subscriber
+parsing the incoming message as a generic JSON tree instead of the
+shared DelayStage type, for no real reason - the event's fields match
+DelayStage exactly, so typed deserialization is simpler and more
+consistent with how the equivalent subscriber works in the companion
+project. Fixed it before finishing the stage rather than leaving an
+inconsistent, needlessly complicated version in.
+
+**Real incident during testing:** delayStage stayed at 0 even after a
+successful POST, on the first attempt. Checked docker-compose.yml and
+both services' MqConfig.java directly against each other first - they
+agreed exactly at that point (both port 61616), so it wasn't a
+mismatch between the project's own files. The actual cause turned out
+to be environment-specific: Windows was refusing to bind port 61616 at
+all (`ports are not available... access forbidden by its access
+permissions`), a known Windows/Docker Desktop issue where the OS
+reserves parts of the port range (commonly related to Hyper-V/WSL's
+dynamic port allocation) out from under Docker.
+
+Fixed by remapping the broker to a different host port -
+`docker-compose.yml` now maps `61660:61616` instead of `61616:61616` -
+and updating `BROKER_URL` in BOTH `MqConfig.java` files (
+delay-stage-service and transit-service) from `tcp://localhost:61616`
+to `tcp://localhost:61660` to match. This is a genuine, permanent
+environment fix, not a one-off glitch that resolved itself - worth
+remembering if this project is ever run on a different machine where
+61616 isn't blocked, since the two files now need to agree with
+whatever port is actually in use, not necessarily the default.
+
+Once both sides were consistently pointed at the correct port, the
+full flow worked immediately: POSTing a new stage for H-503 published
+to package-status-topic, and the very next GET to transit-service's
+/eta endpoint reflected it correctly - delayStage: 6, etaEarliestHours:
+36, etaLatestHours: 54, exactly matching the formula verified in Stage
+2. This closes out Stage 3 - the required core of this second project
+is now fully built and genuinely proven working against real, live
+services.
