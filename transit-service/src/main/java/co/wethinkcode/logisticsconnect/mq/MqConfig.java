@@ -7,7 +7,7 @@ package co.wethinkcode.logisticsconnect.mq;
  */
 public final class MqConfig {
 
-    public static final String BROKER_URL = "tcp://localhost:61616";
+    public static final String BROKER_URL = "tcp://localhost:61660";
     public static final String TOPIC = "package-status-topic";
 
     private MqConfig() {
