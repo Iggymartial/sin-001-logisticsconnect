@@ -1,8 +1,10 @@
 package co.wethinkcode.logisticsconnect;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import co.wethinkcode.logisticsconnect.mq.DelayStageEventPublisher;
 import io.javalin.Javalin;
 import io.javalin.http.HttpStatus;
 
@@ -14,24 +16,29 @@ public class DelayStageServiceApp {
     public static void main(String[] args) {
         Javalin app = Javalin.create().start(7052);
 
-        // ConcurrentHashMap, not a plain HashMap: Javalin handles each
-        // request on its own thread, so reads and writes to per-hub
-        // stages need to be genuinely thread-safe, not just usually fine.
-        Map<String, Integer> stagesByHub = new ConcurrentHashMap<>();
+       // Now stores the full DelayStage (including when it was last
+        // set), not just a bare int - needed so GET can return a real
+        // timestamp, not a fabricated one, for any hub that's actually
+        // had a stage explicitly set.
+        Map<String, DelayStage> stagesByHub = new ConcurrentHashMap<>();
+
+        // connectOrNoOp(): if the broker is down, this logs a warning and
+        // falls back to a no-op - the REST API (fully working since
+        // Stage 2) must keep working with or without MQ available.
+        DelayStageEventPublisher eventPublisher = DelayStageEventPublisher.connectOrNoOp();
 
         app.get("/health", ctx -> ctx.result("OK"));
 
         app.get("/delay-stage/{hubId}", ctx -> {
             String hubId = ctx.pathParam("hubId").toUpperCase();
 
-            // A hub with no stage ever explicitly set defaults to 0 (no
-            // delay), rather than 404. Reasoning: transit-service needs
-            // SOME stage value for any hub it's asked to calculate an ETA
-            // for, and "no delay reported" is a more useful default than
-            // forcing every hub to be explicitly initialised before an
-            // ETA can ever be computed.
-            int stage = stagesByHub.getOrDefault(hubId, 0);
-            ctx.json(new DelayStage(hubId, stage));
+            // A hub with no stage ever explicitly set still defaults to 0
+            // (no delay) rather than 404 - same reasoning as Stage 2, now
+            // just carrying a freshly-generated timestamp too, since there
+            // was never a real "set" moment to report.
+            DelayStage stage = stagesByHub.getOrDefault(
+                hubId, new DelayStage(hubId, 0, Instant.now().toString()));
+            ctx.json(stage);
         });
 
         app.post("/delay-stage/{hubId}", ctx -> {
@@ -45,13 +52,16 @@ public class DelayStageServiceApp {
                 return;
             }
 
-            stagesByHub.put(hubId, request.stage());
+            DelayStage updated = new DelayStage(hubId, request.stage(), Instant.now().toString());
+            stagesByHub.put(hubId, updated);
 
-            // MQ TODO (Stage 3): publish this stage change to
-            // package-status-topic here, right after the state change is
-            // accepted and stored.
+            // Stage 3: broadcast this stage change to package-status-topic,
+            // right after the state change is accepted and stored -
+            // transit-service subscribes to this instead of polling this
+            // endpoint directly.
+            eventPublisher.publish(updated);
 
-            ctx.json(new DelayStage(hubId, request.stage()));
+            ctx.json(updated);
         });
     }
 }
